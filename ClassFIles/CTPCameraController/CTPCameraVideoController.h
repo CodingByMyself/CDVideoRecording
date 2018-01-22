@@ -1,0 +1,41 @@
+//
+//  CTPCameraVideoController.h
+//  CDTestVideo
+//
+//  Created by Cindy on 2017/10/9.
+//  Copyright © 2017年 Cindy. All rights reserved.
+//
+
+#import <UIKit/UIKit.h>
+
+
+typedef void(^TakePhotosCompletionBlock)(UIImage *image, NSError *error);
+typedef void(^ShootCompletionBlock)(NSURL *videoUrl, CGFloat videoTimeLength, UIImage *thumbnailImage, NSError *error);
+
+
+@interface CTPCameraVideoController : UIViewController
+
+/**
+ *  拍照完成后的Block回调
+ */
+@property (copy, nonatomic) TakePhotosCompletionBlock takePhotosCompletionBlock;
+
+/**
+ *  拍摄完成后的Block回调
+ */
+@property (copy, nonatomic) ShootCompletionBlock shootCompletionBlock;
+
+/**
+ *  自定义APP相册名字，如果为空则默认为APP的名字
+ */
+@property (strong, nonatomic) NSString *assetCollectionName;
+
+/**
+ *  视频文件保存文件夹，如果没有定义，默认在document/video文件夹下面
+ */
+@property (strong, nonatomic) NSString *videoFilePath;
+
++ (instancetype)defaultCameraController;
+
+
+@end
