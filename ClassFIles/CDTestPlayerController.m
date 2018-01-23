@@ -56,6 +56,8 @@
 
 - (void)back
 {
+    [self.playerView pause];
+    _playerView = nil;
     [self dismissViewControllerAnimated:YES completion:nil];
 }
 

@@ -7,24 +7,23 @@
 //
 
 #import "CTPCameraVideoController.h"
-#import <AVFoundation/AVFoundation.h>
 #import <AssetsLibrary/AssetsLibrary.h>
+#import "CTPVideoWriterManager.h"
 #import "CTPCameraButton.h"
 #import "CTPPhotoLibraryManager.h"
 #import "Masonry.h"
 #import <Photos/Photos.h>
 #import <CoreMotion/CoreMotion.h>
 
+
 #define kScreenWidth [UIScreen mainScreen].bounds.size.width
 #define kScreenHeight [UIScreen mainScreen].bounds.size.height
-#define VIDEO_FILEPATH                                              @"video"
+
 #define TIMER_INTERVAL 0.01f                                        //定时器记录视频间隔
-#define VIDEO_RECORDER_MAX_TIME 15.0f                               //视频最大时长 (单位/秒)
+#define VIDEO_RECORDER_MAX_TIME 10.0f                               //视频最大时长 (单位/秒)
 #define VIDEO_RECORDER_MIN_TIME 1.0f                                //最短视频时长 (单位/秒)
-#define START_VIDEO_ANIMATION_DURATION 0.3f                         //录制视频前的动画时间
+#define START_VIDEO_ANIMATION_DURATION 0.2f                         //录制视频前的动画时间
 
-
-typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 
 
 @interface CTPCameraVideoController () <AVCaptureVideoDataOutputSampleBufferDelegate, AVCaptureAudioDataOutputSampleBufferDelegate, UIGestureRecognizerDelegate>
@@ -32,22 +31,7 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     CGFloat timeLength;             //时间长度
 }
 
-@property (nonatomic, strong) dispatch_queue_t videoQueue;
-
-@property (strong, nonatomic) AVCaptureSession *captureSession;                          //负责输入和输出设备之间的数据传递
-
-@property (nonatomic, strong) AVCaptureDeviceInput *videoInput;                          //视频输入
-@property (nonatomic, strong) AVCaptureDeviceInput *audioInput;                          //声音输入
-@property (nonatomic, strong) AVCaptureVideoDataOutput *videoOutput;
-@property (nonatomic, strong) AVCaptureAudioDataOutput *audioOutput;
-
-@property (strong, nonatomic) AVCaptureStillImageOutput *captureStillImageOutput;        //照片输出流
-
-@property (nonatomic, strong) AVAssetWriter *assetWriter;
-@property (nonatomic, strong) AVAssetWriterInput *assetWriterVideoInput;
-@property (nonatomic, strong) AVAssetWriterInput *assetWriterAudioInput;
-@property (nonatomic, strong) NSDictionary *videoCompressionSettings;
-@property (nonatomic, strong) NSDictionary *audioCompressionSettings;
+@property (nonatomic, strong) CTPVideoWriterManager *videoWriterManager;
 @property (nonatomic, assign) BOOL canWrite;
 
 @property (strong, nonatomic) AVCaptureVideoPreviewLayer *captureVideoPreviewLayer;      //预览图层
@@ -76,7 +60,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 @property (strong, nonatomic) UIView *photoPreviewContainerView;                         //相片预览ContainerView
 @property (strong, nonatomic) UIImageView *photoPreviewImageView;                        //相片预览ImageView
 @property (strong, nonatomic) UIView *videoPreviewContainerView;                         //视频预览View
-@property (strong, nonatomic) NSURL *videoURL;                                           //视频文件地址
 @property (strong, nonatomic) AVPlayerLayer *playerLayer;
 @property (strong, nonatomic) AVPlayer *player;
 @property (strong, nonatomic) AVPlayerItem *playerItem;
@@ -148,7 +131,7 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 {
     [super viewDidAppear:animated];
     
-    [self startSession];
+    [self.videoWriterManager startSession];
     
     [self setFocusCursorWithPoint:self.viewContainer.center];
     
@@ -170,7 +153,7 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 {
     [super viewDidDisappear:animated];
     
-    [self stopSession];
+    [self.videoWriterManager stopSession];
     
     [self stopUpdateAccelerometer];
 }
@@ -201,40 +184,14 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 - (void)rotateCameraButtonClickedEvent:(id)sender
 {
     _isRotatingCamera = YES;
-    
-    AVCaptureDevice *currentDevice = [self.videoInput device];
-    AVCaptureDevicePosition currentPosition = [currentDevice position];
-    
-    AVCaptureDevice *toChangeDevice;
-    AVCaptureDevicePosition toChangePosition = AVCaptureDevicePositionFront;
-    if (currentPosition == AVCaptureDevicePositionUnspecified || currentPosition == AVCaptureDevicePositionFront)
-    {
-        toChangePosition = AVCaptureDevicePositionBack;
-    }
-    toChangeDevice = [self getCameraDeviceWithPosition:toChangePosition];
-    
-    //获得要调整的设备输入对象
-    AVCaptureDeviceInput *toChangeDeviceInput = [[AVCaptureDeviceInput alloc] initWithDevice:toChangeDevice error:nil];
-    
-    //改变会话的配置前一定要先开启配置，配置完成后提交配置改变
-    [self.captureSession beginConfiguration];
-    //移除原有输入对象
-    [self.captureSession removeInput:self.videoInput];
-    //添加新的输入对象
-    if ([self.captureSession canAddInput:toChangeDeviceInput])
-    {
-        [self.captureSession addInput:toChangeDeviceInput];
-        self.videoInput = toChangeDeviceInput;
-    }
-    
-    //提交会话配置
-    [self.captureSession commitConfiguration];
-    
+    [self.videoWriterManager rotateCamera];
     _isRotatingCamera = NO;
 }
 
 - (void)cancelButtonClickedEvent:(id)sender
 {
+    [[NSFileManager defaultManager] removeItemAtURL:self.videoWriterManager.videoURL error:nil];
+    
     [self removePlayerItemNotification];
     
     [self startAnimationGroup];
@@ -246,21 +203,16 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 - (void)confirmButtonClickedEvent:(id)sender
 {
     __weak typeof(self) weakSelf = self;
-    if (self.photoPreviewImageView)
-    {
-        UIImage *finalImage = [self cutImageWithView:self.photoPreviewImageView];
+    if (self.photoPreviewImageView) {
+        UIImage *finalImage = [weakSelf cutImageWithView:weakSelf.photoPreviewImageView];
         
-        [CTPPhotoLibraryManager savePhotoWithImage:finalImage andAssetCollectionName:self.assetCollectionName withCompletion:^(UIImage *image, NSError *error) {
+        [CTPPhotoLibraryManager savePhotoWithImage:finalImage andAssetCollectionName:weakSelf.assetCollectionName withCompletion:^(UIImage *image, NSError *error) {
             
-            if (self.takePhotosCompletionBlock)
-            {
-                if (error)
-                {
+            if (weakSelf.takePhotosCompletionBlock) {
+                if (error) {
                     NSLog(@"保存照片失败!");
                     weakSelf.takePhotosCompletionBlock(nil, error);
-                }
-                else
-                {
+                } else {
                     NSLog(@"保存照片成功!");
                     weakSelf.takePhotosCompletionBlock(image, nil);
                 }
@@ -268,50 +220,57 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
             
         }];
         
-        self.buttonConfirm.userInteractionEnabled = NO;
+        weakSelf.buttonConfirm.userInteractionEnabled = NO;
         
-    }
-    else
-    {
-        [weakSelf cropWithVideoUrlStr:weakSelf.videoURL start:0 end:weakSelf.currentVideoTimeLength completion:^(NSURL *outputURL, Float64 videoDuration, BOOL isSuccess) {
+    } else {
+        
+        [weakSelf.videoWriterManager cropWithVideoStart:0 end:weakSelf.currentVideoTimeLength maxLengthTime:VIDEO_RECORDER_MAX_TIME completion:^(NSURL *outputURL, Float64 videoDuration, BOOL isSuccess) {
             
-            if (isSuccess)
-            {
+            if (isSuccess) {
                 [CTPPhotoLibraryManager saveVideoWithVideoUrl:outputURL andAssetCollectionName:nil withCompletion:^(NSURL *videoUrl, NSError *error) {
-                    
-                    if (self.shootCompletionBlock)
-                    {
-                        if (error)
-                        {
+
+                    if (weakSelf.shootCompletionBlock) {
+                        if (error) {
                             NSLog(@"保存视频失败!");
                             weakSelf.shootCompletionBlock(nil, 0, nil, error);
-                        }
-                        else
-                        {
+                        } else {
                             NSLog(@"保存视频成功!");
-                            
+
                             // 获取视频的第一帧图片
-                            UIImage *image = [weakSelf thumbnailImageRequestWithVideoUrl:videoUrl andTime:0.01f];
-                            
-                            weakSelf.shootCompletionBlock(videoUrl, videoDuration, image, nil);
-                            
-                            [[NSFileManager defaultManager] removeItemAtURL:weakSelf.videoURL error:nil];
-                            weakSelf.videoURL = nil;
+                            UIImage *image = [weakSelf.videoWriterManager thumbnailImageRequestWithVideoUrl:videoUrl andTime:0.01f];
+
+                            UIImage *finalImage = nil;
+                            if (weakSelf.shootingOrientation == UIDeviceOrientationLandscapeRight) {
+                                finalImage = [weakSelf rotateImage:image withOrientation:UIImageOrientationDown];
+                            } else if (weakSelf.shootingOrientation == UIDeviceOrientationLandscapeLeft) {
+                                finalImage = [weakSelf rotateImage:image withOrientation:UIImageOrientationUp];
+                            } else if (weakSelf.shootingOrientation == UIDeviceOrientationPortraitUpsideDown) {
+                                finalImage = [weakSelf rotateImage:image withOrientation:UIImageOrientationLeft];
+                            } else {
+                                finalImage = [weakSelf rotateImage:image withOrientation:UIImageOrientationRight];
+                            }
+
+                            weakSelf.shootCompletionBlock(videoUrl, videoDuration, finalImage, nil);
+
+                            NSError *error = nil;
+                            [[NSFileManager defaultManager] removeItemAtURL:weakSelf.videoWriterManager.videoURL error:&error];
+                            NSLog(@"删除缓存在本地的视频文件：%@",error);
+                            weakSelf.videoWriterManager.videoURL = nil;
+                            finalImage = nil;
+                            image = nil;
                         }
                     }
-                    
-                    weakSelf.buttonConfirm.userInteractionEnabled = NO;
-                    
+
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        weakSelf.buttonConfirm.userInteractionEnabled = NO;
+                    });
                 }];
-            }
-            else
-            {
+            } else {
                 NSLog(@"保存视频失败!");
-                [[NSFileManager defaultManager] removeItemAtURL:weakSelf.videoURL error:nil];
-                weakSelf.videoURL = nil;
+                [[NSFileManager defaultManager] removeItemAtURL:weakSelf.videoWriterManager.videoURL error:nil];
+                weakSelf.videoWriterManager.videoURL = nil;
                 [[NSFileManager defaultManager] removeItemAtURL:outputURL error:nil];
             }
-            
             
         }];
         
@@ -319,31 +278,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 }
 
 #pragma mark - 懒加载
-- (AVCaptureSession *)captureSession
-{
-    if (_captureSession == nil)
-    {
-        _captureSession = [[AVCaptureSession alloc] init];
-        
-        if ([_captureSession canSetSessionPreset:AVCaptureSessionPresetHigh])
-        {
-            _captureSession.sessionPreset = AVCaptureSessionPresetHigh;
-        }
-    }
-    
-    return _captureSession;
-}
-
-- (dispatch_queue_t)videoQueue
-{
-    if (!_videoQueue)
-    {
-        _videoQueue = dispatch_get_main_queue();
-    }
-    
-    return _videoQueue;
-}
-
 - (CMMotionManager *)motionManager
 {
     if (!_motionManager)
@@ -351,6 +285,14 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
         _motionManager = [[CMMotionManager alloc] init];
     }
     return _motionManager;
+}
+
+- (CTPVideoWriterManager *)videoWriterManager
+{
+    if (_videoWriterManager == nil) {
+        _videoWriterManager = [[CTPVideoWriterManager alloc] initWithBufferDelegate:self];
+    }
+    return _videoWriterManager;
 }
 
 #pragma mark -
@@ -507,12 +449,12 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 - (void)initAVCaptureSession
 {
     //1、添加 "视频" 与 "音频" 输入流到session
-    [self setupVideo];
+    [self.videoWriterManager setupVideo];
     
-    [self setupAudio];
+    [self.videoWriterManager setupAudio];
     
     //2、添加图片，movie输出流到session
-    [self setupCaptureStillImageOutput];
+    [self.videoWriterManager setupCaptureStillImageOutput];
     
     //3、创建视频预览层，用于实时展示摄像头状态
     [self setupCaptureVideoPreviewLayer];
@@ -523,91 +465,11 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 }
 
 /**
- *  设置视频输入
- */
-- (void)setupVideo
-{
-    AVCaptureDevice *captureDevice = [self getCameraDeviceWithPosition:AVCaptureDevicePositionBack];
-    if (!captureDevice)
-    {
-        NSLog(@"取得后置摄像头时出现问题.");
-        
-        return;
-    }
-    
-    NSError *error = nil;
-    self.videoInput = [[AVCaptureDeviceInput alloc] initWithDevice:captureDevice error:&error];
-    if (error)
-    {
-        NSLog(@"取得设备输入videoInput对象时出错，错误原因：%@", error);
-        
-        return;
-    }
-    
-    //3、将设备输出添加到会话中
-    if ([self.captureSession canAddInput:self.videoInput])
-    {
-        [self.captureSession addInput:self.videoInput];
-    }
-    
-    self.videoOutput = [[AVCaptureVideoDataOutput alloc] init];
-    self.videoOutput.alwaysDiscardsLateVideoFrames = YES; //立即丢弃旧帧，节省内存，默认YES
-    [self.videoOutput setSampleBufferDelegate:self queue:self.videoQueue];
-    if ([self.captureSession canAddOutput:self.videoOutput])
-    {
-        [self.captureSession addOutput:self.videoOutput];
-    }
-}
-
-/**
- *  设置音频录入
- */
-- (void)setupAudio
-{
-    NSError *error = nil;
-    self.audioInput = [[AVCaptureDeviceInput alloc] initWithDevice:[AVCaptureDevice defaultDeviceWithMediaType:AVMediaTypeAudio] error:&error];
-    if (error)
-    {
-        NSLog(@"取得设备输入audioInput对象时出错，错误原因：%@", error);
-        
-        return;
-    }
-    if ([self.captureSession canAddInput:self.audioInput])
-    {
-        [self.captureSession addInput:self.audioInput];
-    }
-    
-    self.audioOutput = [[AVCaptureAudioDataOutput alloc] init];
-    [self.audioOutput setSampleBufferDelegate:self queue:self.videoQueue];
-    if([self.captureSession canAddOutput:self.audioOutput])
-    {
-        [self.captureSession addOutput:self.audioOutput];
-    }
-}
-
-/**
- *  设置图片输出
- */
-- (void)setupCaptureStillImageOutput
-{
-    self.captureStillImageOutput = [[AVCaptureStillImageOutput alloc] init];
-    NSDictionary *outputSettings = @{
-                                     AVVideoCodecKey:AVVideoCodecJPEG
-                                     };
-    [_captureStillImageOutput setOutputSettings:outputSettings];
-    
-    if ([self.captureSession canAddOutput:_captureStillImageOutput])
-    {
-        [self.captureSession addOutput:_captureStillImageOutput];
-    }
-}
-
-/**
  *  设置预览layer
  */
 - (void)setupCaptureVideoPreviewLayer
 {
-    _captureVideoPreviewLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession:self.captureSession];
+    _captureVideoPreviewLayer = [[AVCaptureVideoPreviewLayer alloc] initWithSession:self.videoWriterManager.captureSession];
     
     CALayer *layer = self.viewContainer.layer;
     [self.view layoutIfNeeded];
@@ -616,28 +478,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     _captureVideoPreviewLayer.videoGravity = AVLayerVideoGravityResizeAspect;           //填充模式
     
     [layer addSublayer:_captureVideoPreviewLayer];
-}
-
-/**
- *  开启会话
- */
-- (void)startSession
-{
-    if (![self.captureSession isRunning])
-    {
-        [self.captureSession startRunning];
-    }
-}
-
-/**
- *  停止会话
- */
-- (void)stopSession
-{
-    if ([self.captureSession isRunning])
-    {
-        [self.captureSession stopRunning];
-    }
 }
 
 /**
@@ -674,8 +514,8 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
         self.buttonTakeCamera.progressPercentage = 0.0f;
         [self.videoPreviewContainerView removeFromSuperview];
         self.videoPreviewContainerView = nil;
-        [[NSFileManager defaultManager] removeItemAtURL:self.videoURL error:nil];
-        self.videoURL = nil;
+        [[NSFileManager defaultManager] removeItemAtURL:self.videoWriterManager.videoURL error:nil];
+        self.videoWriterManager.videoURL = nil;
     }
     
     [self.view bringSubviewToFront:self.buttonRotateCamera];
@@ -748,72 +588,16 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     }];
 }
 
-/**
- *  取得指定位置的摄像头
- *
- *  @param position 摄像头位置
- *
- *  @return 摄像头设备
- */
-- (AVCaptureDevice *)getCameraDeviceWithPosition:(AVCaptureDevicePosition )position
-{
-    NSArray *cameras = [AVCaptureDevice devicesWithMediaType:AVMediaTypeVideo];
-    for (AVCaptureDevice *camera in cameras)
-    {
-        if ([camera position] == position)
-        {
-            return camera;
-        }
-    }
-    return nil;
-}
-
-/**
- *  改变设备属性的统一操作方法
- *
- *  @param propertyChange 属性改变操作
- */
-- (void)changeDeviceProperty:(PropertyChangeBlock)propertyChange
-{
-    AVCaptureDevice *captureDevice = [self.videoInput device];
-    NSError *error;
-    
-    //注意改变设备属性前一定要首先调用lockForConfiguration:调用完之后使用unlockForConfiguration方法解锁
-    if ([captureDevice lockForConfiguration:&error])
-    {
-        propertyChange(captureDevice);
-        [captureDevice unlockForConfiguration];
-    }
-    else
-    {
-        NSLog(@"设置设备属性过程发生错误，错误信息：%@",error.localizedDescription);
-    }
-}
 
 #pragma mark - 拍照功能
-
 /**
  *  拍照方法
  */
 - (void)takePhotos:(UITapGestureRecognizer *)tapGestureRecognizer
 {
-    //根据设备输出获得连接
-    AVCaptureConnection *captureConnection = [self.captureStillImageOutput connectionWithMediaType:AVMediaTypeVideo];
-    
-    if (captureConnection == nil) {
-        NSLog(@"当前设备不支持拍照功能！");
-        return;
-    }
-    
-    [captureConnection setVideoScaleAndCropFactor:self.effectiveScale];
-    
-    //根据连接取得设备输出的数据
-    [self.captureStillImageOutput captureStillImageAsynchronouslyFromConnection:captureConnection completionHandler:^(CMSampleBufferRef imageDataSampleBuffer, NSError *error) {
-        if (imageDataSampleBuffer)
-        {
-            NSData *imageData = [AVCaptureStillImageOutput jpegStillImageNSDataRepresentation:imageDataSampleBuffer];
+    [self.videoWriterManager takePhotoWithEffectiveScale:self.effectiveScale complete:^(BOOL result, NSData *imageData) {
+        if (result) {
             UIImage *image = [UIImage imageWithData:imageData];
-            
             [self previewPhotoWithImage:image];
         }
     }];
@@ -938,15 +722,25 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     __weak typeof(self) weakSelf = self;
     dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(START_VIDEO_ANIMATION_DURATION * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
         
-        NSURL *url = [NSURL fileURLWithPath:[weakSelf createVideoFilePath]];
-        self.videoURL = url;
-        
-        [self setUpWriter];
+        CGAffineTransform  transform;
+        if (self.shootingOrientation == UIDeviceOrientationLandscapeRight) {
+            transform = CGAffineTransformMakeRotation(M_PI);
+        } else if (self.shootingOrientation == UIDeviceOrientationLandscapeLeft) {
+            transform = CGAffineTransformMakeRotation(0);
+        } else if (self.shootingOrientation == UIDeviceOrientationPortraitUpsideDown) {
+            transform = CGAffineTransformMakeRotation(M_PI + (M_PI / 2.0));
+        } else {
+            transform = CGAffineTransformMakeRotation(M_PI / 2.0);
+        }
+        [self.videoWriterManager setupWriterPropertysWithSize:CGSizeMake(kScreenWidth, kScreenHeight) andTransform:transform];
+        weakSelf.canWrite = NO;
         
         [weakSelf timerFired];
         
     });
 }
+
+
 
 /**
  *  结束录制视频
@@ -961,20 +755,12 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
         [self timerStop];
         
         __weak __typeof(self)weakSelf = self;
-        if(_assetWriter && _assetWriter.status == AVAssetWriterStatusWriting)
-        {
-            //        dispatch_async(self.videoQueue, ^{
-            [_assetWriter finishWritingWithCompletionHandler:^{
-                weakSelf.canWrite = NO;
-                weakSelf.assetWriter = nil;
-                weakSelf.assetWriterAudioInput = nil;
-                weakSelf.assetWriterVideoInput = nil;
-            }];
-            //        });
-        }
         
-        if (timeLength < VIDEO_RECORDER_MIN_TIME)
-        {
+        [self.videoWriterManager stopVideoRecorder:^(BOOL can) {
+            weakSelf.canWrite = can;
+        }];
+        
+        if (timeLength < VIDEO_RECORDER_MIN_TIME) {
             return;
         }
         
@@ -990,163 +776,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     {
         // nothing
     }
-}
-
-/**
- *  设置写入视频属性
- */
-- (void)setUpWriter
-{
-    if (self.videoURL == nil)
-    {
-        return;
-    }
-    
-    self.assetWriter = [AVAssetWriter assetWriterWithURL:self.videoURL fileType:AVFileTypeMPEG4 error:nil];
-    //写入视频大小
-    NSInteger numPixels = kScreenWidth * kScreenHeight;
-    //每像素比特
-    CGFloat bitsPerPixel = 30.0;
-    NSInteger bitsPerSecond = numPixels * bitsPerPixel;
-    
-    // 码率和帧率设置
-    NSDictionary *compressionProperties = @{ AVVideoAverageBitRateKey : @(bitsPerSecond),
-                                             AVVideoExpectedSourceFrameRateKey : @(10.0),
-                                             AVVideoMaxKeyFrameIntervalKey : @(5.0),
-                                             AVVideoProfileLevelKey : AVVideoProfileLevelH264BaselineAutoLevel };
-    
-    //视频属性
-    self.videoCompressionSettings = @{ AVVideoCodecKey : AVVideoCodecH264,
-                                       AVVideoScalingModeKey : AVVideoScalingModeResizeAspectFill,
-                                       AVVideoWidthKey : @(kScreenHeight*2.0),
-                                       AVVideoHeightKey : @(kScreenWidth*2.0),
-                                       AVVideoCompressionPropertiesKey : compressionProperties };
-    
-    _assetWriterVideoInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeVideo outputSettings:self.videoCompressionSettings];
-    //expectsMediaDataInRealTime 必须设为yes，需要从capture session 实时获取数据
-    _assetWriterVideoInput.expectsMediaDataInRealTime = YES;
-    
-    if (self.shootingOrientation == UIDeviceOrientationLandscapeRight)
-    {
-        _assetWriterVideoInput.transform = CGAffineTransformMakeRotation(M_PI);
-    }
-    else if (self.shootingOrientation == UIDeviceOrientationLandscapeLeft)
-    {
-        _assetWriterVideoInput.transform = CGAffineTransformMakeRotation(0);
-    }
-    else if (self.shootingOrientation == UIDeviceOrientationPortraitUpsideDown)
-    {
-        _assetWriterVideoInput.transform = CGAffineTransformMakeRotation(M_PI + (M_PI / 2.0));
-    }
-    else
-    {
-        _assetWriterVideoInput.transform = CGAffineTransformMakeRotation(M_PI / 2.0);
-    }
-    
-    // 音频设置
-    self.audioCompressionSettings = @{ AVEncoderBitRatePerChannelKey : @(28000),
-                                       AVFormatIDKey : @(kAudioFormatMPEG4AAC),
-                                       AVNumberOfChannelsKey : @(1),
-                                       AVSampleRateKey : @(22050) };
-    
-    _assetWriterAudioInput = [AVAssetWriterInput assetWriterInputWithMediaType:AVMediaTypeAudio outputSettings:self.audioCompressionSettings];
-    _assetWriterAudioInput.expectsMediaDataInRealTime = YES;
-    
-    if ([_assetWriter canAddInput:_assetWriterVideoInput])
-    {
-        [_assetWriter addInput:_assetWriterVideoInput];
-    }
-    else
-    {
-        NSLog(@"AssetWriter videoInput append Failed");
-    }
-    
-    if ([_assetWriter canAddInput:_assetWriterAudioInput])
-    {
-        [_assetWriter addInput:_assetWriterAudioInput];
-    }
-    else
-    {
-        NSLog(@"AssetWriter audioInput Append Failed");
-    }
-    
-    _canWrite = NO;
-}
-
-- (NSString *)createVideoFilePath
-{
-    // 创建视频文件的存储路径
-    NSString *filePath = [self createVideoFolderPath];
-    if (filePath == nil)
-    {
-        return nil;
-    }
-    
-    NSString *videoType = @".mp4";
-    NSString *videoDestDateString = [self createFileNamePrefix];
-    NSString *videoFileName = [videoDestDateString stringByAppendingString:videoType];
-    
-    NSUInteger idx = 1;
-    /*We only allow 10000 same file name*/
-    NSString *finalPath = [NSString stringWithFormat:@"%@/%@", filePath, videoFileName];
-    
-    while (idx % 10000 && [[NSFileManager defaultManager] fileExistsAtPath:finalPath])
-    {
-        finalPath = [NSString stringWithFormat:@"%@/%@_(%lu)%@", filePath, videoDestDateString, (unsigned long)idx++, videoType];
-    }
-    
-    return finalPath;
-}
-
-- (NSString *)createVideoFolderPath
-{
-    NSFileManager *fileManager = [NSFileManager defaultManager];
-    NSString *homePath = NSHomeDirectory();
-    
-    NSString *tmpFilePath;
-    
-    if (homePath.length > 0)
-    {
-        NSString *documentPath = [homePath stringByAppendingString:@"/Documents"];
-        if ([fileManager fileExistsAtPath:documentPath isDirectory:NULL] == YES)
-        {
-            BOOL success = NO;
-            
-            NSArray *paths = [fileManager contentsOfDirectoryAtPath:documentPath error:nil];
-            
-            //offline file folder
-            tmpFilePath = [documentPath stringByAppendingString:[NSString stringWithFormat:@"/%@", VIDEO_FILEPATH]];
-            if ([paths containsObject:VIDEO_FILEPATH] == NO)
-            {
-                success = [fileManager createDirectoryAtPath:tmpFilePath withIntermediateDirectories:YES attributes:nil error:nil];
-                if (!success)
-                {
-                    tmpFilePath = nil;
-                }
-            }
-            return tmpFilePath;
-        }
-    }
-    
-    return false;
-}
-
-/**
- *  创建文件名
- *
- *  @prama type 文件名类型
- */
-- (NSString *)createFileNamePrefix
-{
-    NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
-    [dateFormatter setDateFormat:@"yyyy-MM-dd HH:mm:ss zzz"];
-    
-    NSString *destDateString = [dateFormatter stringFromDate:[NSDate date]];
-    destDateString = [destDateString stringByReplacingOccurrencesOfString:@" " withString:@"-"];
-    destDateString = [destDateString stringByReplacingOccurrencesOfString:@"+" withString:@"-"];
-    destDateString = [destDateString stringByReplacingOccurrencesOfString:@":" withString:@"-"];
-    
-    return destDateString;
 }
 
 /**
@@ -1200,11 +829,11 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
  */
 - (void)previewVideoAfterShoot
 {
-    if (self.videoURL == nil || self.videoPreviewContainerView != nil) {
+    if (self.videoWriterManager.videoURL == nil || self.videoPreviewContainerView != nil) {
         return;
     }
     
-    AVURLAsset *asset = [AVURLAsset assetWithURL:self.videoURL];
+    AVURLAsset *asset = [AVURLAsset assetWithURL:self.videoWriterManager.videoURL];
     
     //获取视频总时长
     Float64 duration = CMTimeGetSeconds(asset.duration);
@@ -1246,61 +875,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     
     // 开始播放
     [self.player play];
-}
-
-/**
- *  截取指定时间的视频缩略图
- *
- *  @param timeBySecond 时间点，单位：s
- */
-- (UIImage *)thumbnailImageRequestWithVideoUrl:(NSURL *)videoUrl andTime:(CGFloat)timeBySecond
-{
-    if (self.videoURL == nil)
-    {
-        return nil;
-    }
-    
-    AVURLAsset *urlAsset = [AVURLAsset assetWithURL:videoUrl];
-    
-    //根据AVURLAsset创建AVAssetImageGenerator
-    AVAssetImageGenerator *imageGenerator = [AVAssetImageGenerator assetImageGeneratorWithAsset:urlAsset];
-    /*截图
-     * requestTime:缩略图创建时间
-     * actualTime:缩略图实际生成的时间
-     */
-    NSError *error = nil;
-    CMTime requestTime = CMTimeMakeWithSeconds(timeBySecond, 10); //CMTime是表示电影时间信息的结构体，第一个参数表示是视频第几秒，第二个参数表示每秒帧数.(如果要活的某一秒的第几帧可以使用CMTimeMake方法)
-    CMTime actualTime;
-    CGImageRef cgImage = [imageGenerator copyCGImageAtTime:requestTime actualTime:&actualTime error:&error];
-    if(error)
-    {
-        NSLog(@"截取视频缩略图时发生错误，错误信息：%@", error.localizedDescription);
-        return nil;
-    }
-    
-    CMTimeShow(actualTime);
-    UIImage *image = [UIImage imageWithCGImage:cgImage];
-    CGImageRelease(cgImage);
-    
-    UIImage *finalImage = nil;
-    if (self.shootingOrientation == UIDeviceOrientationLandscapeRight)
-    {
-        finalImage = [self rotateImage:image withOrientation:UIImageOrientationDown];
-    }
-    else if (self.shootingOrientation == UIDeviceOrientationLandscapeLeft)
-    {
-        finalImage = [self rotateImage:image withOrientation:UIImageOrientationUp];
-    }
-    else if (self.shootingOrientation == UIDeviceOrientationPortraitUpsideDown)
-    {
-        finalImage = [self rotateImage:image withOrientation:UIImageOrientationLeft];
-    }
-    else
-    {
-        finalImage = [self rotateImage:image withOrientation:UIImageOrientationRight];
-    }
-    
-    return finalImage;
 }
 
 /**
@@ -1364,71 +938,6 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     return newPic;
 }
 
-#pragma mark - 截取视频方法
-
-- (void)cropWithVideoUrlStr:(NSURL *)videoUrl start:(CGFloat)startTime end:(CGFloat)endTime completion:(void (^)(NSURL *outputURL, Float64 videoDuration, BOOL isSuccess))completionHandle
-{
-    AVURLAsset *asset =[[AVURLAsset alloc] initWithURL:videoUrl options:nil];
-    
-    //获取视频总时长
-    Float64 duration = CMTimeGetSeconds(asset.duration);
-    
-    if (duration > 10)
-    {
-        duration = VIDEO_RECORDER_MAX_TIME;
-    }
-    
-    startTime = 0;
-    endTime = duration;
-    
-    NSString *outputFilePath = [self createVideoFilePath];
-    NSURL *outputFileUrl = [NSURL fileURLWithPath:outputFilePath];
-    
-    NSArray *compatiblePresets = [AVAssetExportSession exportPresetsCompatibleWithAsset:asset];
-    if ([compatiblePresets containsObject:AVAssetExportPresetMediumQuality])
-    {
-        
-        AVAssetExportSession *exportSession = [[AVAssetExportSession alloc]
-                                               initWithAsset:asset presetName:AVAssetExportPresetPassthrough];
-        
-        NSURL *outputURL = outputFileUrl;
-        
-        exportSession.outputURL = outputURL;
-        exportSession.outputFileType = AVFileTypeMPEG4;
-        exportSession.shouldOptimizeForNetworkUse = YES;
-        
-        CMTime start = CMTimeMakeWithSeconds(startTime, asset.duration.timescale);
-        CMTime duration = CMTimeMakeWithSeconds(endTime - startTime,asset.duration.timescale);
-        CMTimeRange range = CMTimeRangeMake(start, duration);
-        exportSession.timeRange = range;
-        
-        [exportSession exportAsynchronouslyWithCompletionHandler:^{
-            switch ([exportSession status]) {
-                case AVAssetExportSessionStatusFailed:
-                {
-                    NSLog(@"合成失败：%@", [[exportSession error] description]);
-                    completionHandle(outputURL, endTime, NO);
-                }
-                    break;
-                case AVAssetExportSessionStatusCancelled:
-                {
-                    completionHandle(outputURL, endTime, NO);
-                }
-                    break;
-                case AVAssetExportSessionStatusCompleted:
-                {
-                    completionHandle(outputURL, endTime, YES);
-                }
-                    break;
-                default:
-                {
-                    completionHandle(outputURL, endTime, NO);
-                } break;
-            }
-        }];
-    }
-}
-
 #pragma mark - 预览视频通知
 /**
  *  添加播放器通知
@@ -1459,35 +968,27 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 }
 
 #pragma mark - AVCaptureVideoDataOutputSampleBufferDelegate AVCaptureAudioDataOutputSampleBufferDelegate
-
 - (void)captureOutput:(AVCaptureOutput *)captureOutput didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer fromConnection:(AVCaptureConnection *)connection
 {
-    if (_isRotatingCamera)
-    {
+    if (_isRotatingCamera) {
         return;
     }
     
-    @autoreleasepool
-    {
+    @autoreleasepool {
         //视频
-        if (connection == [self.videoOutput connectionWithMediaType:AVMediaTypeVideo])
+        if (connection == [self.videoWriterManager.videoOutput connectionWithMediaType:AVMediaTypeVideo])
         {
-            @synchronized(self)
-            {
-                if (_isShooting)
-                {
+            @synchronized(self) {
+                if (_isShooting) {
                     [self appendSampleBuffer:sampleBuffer ofMediaType:AVMediaTypeVideo];
                 }
             }
         }
         
         //音频
-        if (connection == [self.audioOutput connectionWithMediaType:AVMediaTypeAudio])
-        {
-            @synchronized(self)
-            {
-                if (_isShooting)
-                {
+        if (connection == [self.videoWriterManager.audioOutput connectionWithMediaType:AVMediaTypeAudio]) {
+            @synchronized(self) {
+                if (_isShooting) {
                     [self appendSampleBuffer:sampleBuffer ofMediaType:AVMediaTypeAudio];
                 }
             }
@@ -1509,25 +1010,19 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
     
     //    CFRetain(sampleBuffer);
     //    dispatch_async(self.videoQueue, ^{
-    @autoreleasepool
-    {
-        if (!self.canWrite && mediaType == AVMediaTypeVideo)
-        {
-            [self.assetWriter startWriting];
-            [self.assetWriter startSessionAtSourceTime:CMSampleBufferGetPresentationTimeStamp(sampleBuffer)];
+    @autoreleasepool {
+        if (!self.canWrite && mediaType == AVMediaTypeVideo) {
+            [self.videoWriterManager.assetWriter startWriting];
+            [self.videoWriterManager.assetWriter startSessionAtSourceTime:CMSampleBufferGetPresentationTimeStamp(sampleBuffer)];
             self.canWrite = YES;
         }
         
         //写入视频数据
-        if (mediaType == AVMediaTypeVideo)
-        {
-            if (self.assetWriterVideoInput.readyForMoreMediaData)
-            {
-                BOOL success = [self.assetWriterVideoInput appendSampleBuffer:sampleBuffer];
-                if (!success)
-                {
-                    @synchronized (self)
-                    {
+        if (mediaType == AVMediaTypeVideo) {
+            if (self.videoWriterManager.assetWriterVideoInput.readyForMoreMediaData) {
+                BOOL success = [self.videoWriterManager.assetWriterVideoInput appendSampleBuffer:sampleBuffer];
+                if (!success) {
+                    @synchronized (self) {
                         [self stopVideoRecorder];
                     }
                 }
@@ -1535,15 +1030,11 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
         }
         
         //写入音频数据
-        if (mediaType == AVMediaTypeAudio)
-        {
-            if (self.assetWriterAudioInput.readyForMoreMediaData)
-            {
-                BOOL success = [self.assetWriterAudioInput appendSampleBuffer:sampleBuffer];
-                if (!success)
-                {
-                    @synchronized (self)
-                    {
+        if (mediaType == AVMediaTypeAudio) {
+            if (self.videoWriterManager.assetWriterAudioInput.readyForMoreMediaData) {
+                BOOL success = [self.videoWriterManager.assetWriterAudioInput appendSampleBuffer:sampleBuffer];
+                if (!success) {
+                    @synchronized (self) {
                         [self stopVideoRecorder];
                     }
                 }
@@ -1575,23 +1066,20 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event
 {
     // 不聚焦的情况：聚焦中，旋转摄像头中，查看录制的视频中，查看照片中
-    if (_isFocusing || touches.count == 0 || _isRotatingCamera || _videoPreviewContainerView || _photoPreviewImageView)
-    {
+    if (_isFocusing || touches.count == 0 || _isRotatingCamera || _videoPreviewContainerView || _photoPreviewImageView) {
         return;
     }
     
     UITouch *touch = nil;
     
-    for (UITouch *t in touches)
-    {
+    for (UITouch *t in touches) {
         touch = t;
         break;
     }
     
     CGPoint point = [touch locationInView:self.viewContainer];;
     
-    if (point.y > CGRectGetMaxY(self.labelTip.frame))
-    {
+    if (point.y > CGRectGetMaxY(self.labelTip.frame)) {
         return;
     }
     
@@ -1635,24 +1123,20 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
  */
 -(void)focusWithPoint:(CGPoint)point
 {
-    [self changeDeviceProperty:^(AVCaptureDevice *captureDevice)
+    [self.videoWriterManager changeDeviceProperty:^(AVCaptureDevice *captureDevice)
      {
          // 聚焦
-         if ([captureDevice isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus])
-         {
+         if ([captureDevice isFocusModeSupported:AVCaptureFocusModeContinuousAutoFocus]) {
              [captureDevice setFocusMode:AVCaptureFocusModeContinuousAutoFocus];
          }
-         if ([captureDevice isFocusPointOfInterestSupported])
-         {
+         if ([captureDevice isFocusPointOfInterestSupported]) {
              [captureDevice setFocusPointOfInterest:point];
          }
          // 曝光
-         if ([captureDevice isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure])
-         {
+         if ([captureDevice isExposureModeSupported:AVCaptureExposureModeContinuousAutoExposure]) {
              [captureDevice setExposureMode:AVCaptureExposureModeContinuousAutoExposure];
          }
-         if ([captureDevice isExposurePointOfInterestSupported])
-         {
+         if ([captureDevice isExposurePointOfInterestSupported]) {
              [captureDevice setExposurePointOfInterest:point];
          }
      }];
@@ -1660,40 +1144,34 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 
 - (void)handlePinchGesture:(UIPinchGestureRecognizer *)recognizer
 {
-    if (_isShooting)
-    {
+    if (_isShooting) {
         return;
     }
     
     BOOL allTouchesAreOnTheCaptureVideoPreviewLayer = YES;
     
     NSUInteger numTouches = [recognizer numberOfTouches], i;
-    for ( i = 0; i < numTouches; ++i)
-    {
+    for ( i = 0; i < numTouches; ++i) {
         CGPoint location = [recognizer locationOfTouch:i inView:self.viewContainer];
         CGPoint convertedLocation = [self.captureVideoPreviewLayer convertPoint:location fromLayer:self.captureVideoPreviewLayer.superlayer];
-        if (![self.captureVideoPreviewLayer containsPoint:convertedLocation])
-        {
+        if (![self.captureVideoPreviewLayer containsPoint:convertedLocation]) {
             allTouchesAreOnTheCaptureVideoPreviewLayer = NO;
             break;
         }
     }
     
-    if (allTouchesAreOnTheCaptureVideoPreviewLayer)
-    {
+    if (allTouchesAreOnTheCaptureVideoPreviewLayer) {
         self.effectiveScale = self.beginGestureScale * recognizer.scale;
-        if (self.effectiveScale < 1.0f)
-        {
+        if (self.effectiveScale < 1.0f) {
             self.effectiveScale = 1.0f;
         }
         
         //        NSLog(@"%f-------------->%f------------recognizerScale%f", self.effectiveScale, self.beginGestureScale, recognizer.scale);
         
-        CGFloat imageMaxScaleAndCropFactor = [[self.captureStillImageOutput connectionWithMediaType:AVMediaTypeVideo] videoMaxScaleAndCropFactor];
+        CGFloat imageMaxScaleAndCropFactor = [[self.videoWriterManager.captureStillImageOutput connectionWithMediaType:AVMediaTypeVideo] videoMaxScaleAndCropFactor];
         
         //        NSLog(@"%f", imageMaxScaleAndCropFactor);
-        if (self.effectiveScale > imageMaxScaleAndCropFactor)
-        {
+        if (self.effectiveScale > imageMaxScaleAndCropFactor) {
             self.effectiveScale = imageMaxScaleAndCropFactor;
         }
         
@@ -1714,8 +1192,7 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
 
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer *)gestureRecognizer
 {
-    if ([gestureRecognizer isKindOfClass:[UIPinchGestureRecognizer class]])
-    {
+    if ([gestureRecognizer isKindOfClass:[UIPinchGestureRecognizer class]]) {
         self.beginGestureScale = self.effectiveScale;
     }
     
@@ -1729,39 +1206,28 @@ typedef void(^PropertyChangeBlock)(AVCaptureDevice *captureDevice);
  */
 - (void)startUpdateAccelerometer
 {
-    if ([self.motionManager isAccelerometerAvailable] == YES)
-    {
+    if ([self.motionManager isAccelerometerAvailable] == YES) {
         //回调会一直调用,建议获取到就调用下面的停止方法，需要再重新开始，当然如果需求是实时不间断的话可以等离开页面之后再stop
         [self.motionManager setAccelerometerUpdateInterval:1.0];
-        [self.motionManager startAccelerometerUpdatesToQueue:[NSOperationQueue currentQueue] withHandler:^(CMAccelerometerData *accelerometerData, NSError *error)
-         {
+        [self.motionManager startAccelerometerUpdatesToQueue:[NSOperationQueue currentQueue] withHandler:^(CMAccelerometerData *accelerometerData, NSError *error) {
              double x = accelerometerData.acceleration.x;
              double y = accelerometerData.acceleration.y;
-             if (fabs(y) >= fabs(x))
-             {
-                 if (y >= 0)
-                 {
+             if (fabs(y) >= fabs(x)) {
+                 if (y >= 0) {
                      // Down
                      NSLog(@"Down");
                      _shootingOrientation = UIDeviceOrientationPortraitUpsideDown;
-                 }
-                 else
-                 {
+                 } else {
                      // Portrait
                      NSLog(@"Portrait");
                      _shootingOrientation = UIDeviceOrientationPortrait;
                  }
-             }
-             else
-             {
-                 if (x >= 0)
-                 {
+             } else {
+                 if (x >= 0) {
                      // Right
                      NSLog(@"Right");
                      _shootingOrientation = UIDeviceOrientationLandscapeRight;
-                 }
-                 else
-                 {
+                 } else {
                      // Left
                      NSLog(@"Left");
                      _shootingOrientation = UIDeviceOrientationLandscapeLeft;

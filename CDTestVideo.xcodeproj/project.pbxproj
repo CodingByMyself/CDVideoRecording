@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		3759B6172011E60E00E731F8 /* CTPVideoPlayerView.m in Sources */ = {isa = PBXBuildFile; fileRef = 3759B6162011E60E00E731F8 /* CTPVideoPlayerView.m */; };
 		3759B61A2011EF1A00E731F8 /* CDTestPlayerController.m in Sources */ = {isa = PBXBuildFile; fileRef = 3759B6192011EF1A00E731F8 /* CDTestPlayerController.m */; };
+		3759B61D2015CFC000E731F8 /* CTPVideoWriterManager.m in Sources */ = {isa = PBXBuildFile; fileRef = 3759B61C2015CFC000E731F8 /* CTPVideoWriterManager.m */; };
 		37D9D3911F8B27810041C38D /* AppDelegate.m in Sources */ = {isa = PBXBuildFile; fileRef = 37D9D3901F8B27810041C38D /* AppDelegate.m */; };
 		37D9D39F1F8B27810041C38D /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = 37D9D39E1F8B27810041C38D /* main.m */; };
 		37D9D3A81F8B27DB0041C38D /* CDMainVC.m in Sources */ = {isa = PBXBuildFile; fileRef = 37D9D3A71F8B27DB0041C38D /* CDMainVC.m */; };
@@ -44,6 +45,8 @@
 		3759B6162011E60E00E731F8 /* CTPVideoPlayerView.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CTPVideoPlayerView.m; sourceTree = "<group>"; };
 		3759B6182011EF1A00E731F8 /* CDTestPlayerController.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CDTestPlayerController.h; sourceTree = "<group>"; };
 		3759B6192011EF1A00E731F8 /* CDTestPlayerController.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CDTestPlayerController.m; sourceTree = "<group>"; };
+		3759B61B2015CFC000E731F8 /* CTPVideoWriterManager.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CTPVideoWriterManager.h; sourceTree = "<group>"; };
+		3759B61C2015CFC000E731F8 /* CTPVideoWriterManager.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = CTPVideoWriterManager.m; sourceTree = "<group>"; };
 		37D9D38C1F8B27810041C38D /* CDTestVideo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CDTestVideo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		37D9D38F1F8B27810041C38D /* AppDelegate.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = AppDelegate.h; sourceTree = "<group>"; };
 		37D9D3901F8B27810041C38D /* AppDelegate.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = AppDelegate.m; sourceTree = "<group>"; };
@@ -200,6 +203,8 @@
 			children = (
 				37D9D3D51F8B4FAE0041C38D /* CTPPhotoLibraryManager.h */,
 				37D9D3D61F8B4FAE0041C38D /* CTPPhotoLibraryManager.m */,
+				3759B61B2015CFC000E731F8 /* CTPVideoWriterManager.h */,
+				3759B61C2015CFC000E731F8 /* CTPVideoWriterManager.m */,
 			);
 			path = PhotoLibraryManager;
 			sourceTree = "<group>";
@@ -307,6 +312,7 @@
 				3759B61A2011EF1A00E731F8 /* CDTestPlayerController.m in Sources */,
 				37D9D3C81F8B29E40041C38D /* MASViewConstraint.m in Sources */,
 				3759B6172011E60E00E731F8 /* CTPVideoPlayerView.m in Sources */,
+				3759B61D2015CFC000E731F8 /* CTPVideoWriterManager.m in Sources */,
 				37D9D3C31F8B29E40041C38D /* MASCompositeConstraint.m in Sources */,
 				37D9D3C91F8B29E40041C38D /* NSArray+MASAdditions.m in Sources */,
 				37D9D3D71F8B4FAE0041C38D /* CTPPhotoLibraryManager.m in Sources */,
